@@ -26,6 +26,7 @@ import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository;
 import com.netflix.spinnaker.security.AuthenticatedRequest;
 import static com.netflix.spinnaker.orca.pipeline.TaskNode.Builder;
 import static com.netflix.spinnaker.orca.pipeline.TaskNode.GraphType.FULL;
+import static com.netflix.spinnaker.orca.pipeline.model.Execution.ExecutionEngine.V2;
 import static java.util.Collections.emptyList;
 import static java.util.stream.Collectors.toList;
 
@@ -51,6 +52,7 @@ public interface StageDefinitionBuilder {
     return StageDefinitionBuilderSupport.getType(this.getClass());
   }
 
+  // TODO: simplify signature once V2 is phased out
   default Stage prepareStageForRestart(
     ExecutionRepository executionRepository,
     Stage stage,
@@ -75,93 +77,97 @@ public interface StageDefinitionBuilder {
       Stage<T> stage,
       StageDefinitionBuilder self,
       Collection<StageDefinitionBuilder> allStageBuilders) {
-      stage.getExecution().setCanceled(false);
 
-      List<Stage<T>> stages = stage.getExecution().getStages();
-      stages
-        .stream()
-        .filter(s -> s.getStatus() == ExecutionStatus.CANCELED)
-        .forEach(s -> {
-            s.setStatus(ExecutionStatus.NOT_STARTED);
-            List<Task> tasks = s.getTasks();
-            tasks
-              .stream()
-              .filter(t -> t.getStatus() == ExecutionStatus.CANCELED)
-              .forEach(t -> {
-                t.setStartTime(null);
-                t.setEndTime(null);
-                t.setStatus(ExecutionStatus.NOT_STARTED);
-              });
-          }
-        );
+      // TODO: all this can go once V2 is phased out
+      if (stage.getExecution().getExecutionEngine() == V2) {
+        stage.getExecution().setCanceled(false);
 
-      List<Stage<T>> childStages = stages
-        .stream()
-        .filter(it -> {
-          Collection<String> requisiteStageRefIds = it.getRequisiteStageRefIds();
-          if (requisiteStageRefIds == null) {
-            requisiteStageRefIds = new ArrayList<>();
-          }
-          if (it.getContext().get("requisiteIds") != null) {
-            requisiteStageRefIds.addAll((Collection<String>) it.getContext().get("requisiteIds"));
-          }
-
-          // only want to consider completed child stages
-          return it.getStatus().isComplete() && requisiteStageRefIds.contains(stage.getRefId());
-        })
-        .collect(toList());
-
-      childStages.forEach((Stage<T> childStage) -> {
-        StageDefinitionBuilder stageBuilder = allStageBuilders
+        List<Stage<T>> stages = stage.getExecution().getStages();
+        stages
           .stream()
-          .filter(it -> it.getType().equals(childStage.getType()))
-          .findFirst()
-          .orElse(self);
-        stageBuilder.prepareStageForRestart(executionRepository, childStage, allStageBuilders);
+          .filter(s -> s.getStatus() == ExecutionStatus.CANCELED)
+          .forEach(s -> {
+              s.setStatus(ExecutionStatus.NOT_STARTED);
+              List<Task> tasks = s.getTasks();
+              tasks
+                .stream()
+                .filter(t -> t.getStatus() == ExecutionStatus.CANCELED)
+                .forEach(t -> {
+                  t.setStartTime(null);
+                  t.setEndTime(null);
+                  t.setStatus(ExecutionStatus.NOT_STARTED);
+                });
+            }
+          );
 
-        // the default `prepareStageForRestart` behavior sets a stage back to RUNNING, that's not appropriate for child stages
-        childStage.setStatus(ExecutionStatus.NOT_STARTED);
-        List<Task> childStageTasks = childStage.getTasks();
-        childStageTasks.forEach(it -> {
-          it.setStartTime(null);
-          it.setEndTime(null);
-          it.setStatus(ExecutionStatus.NOT_STARTED);
+        List<Stage<T>> childStages = stages
+          .stream()
+          .filter(it -> {
+            Collection<String> requisiteStageRefIds = it.getRequisiteStageRefIds();
+            if (requisiteStageRefIds == null) {
+              requisiteStageRefIds = new ArrayList<>();
+            }
+            if (it.getContext().get("requisiteIds") != null) {
+              requisiteStageRefIds.addAll((Collection<String>) it.getContext().get("requisiteIds"));
+            }
+
+            // only want to consider completed child stages
+            return it.getStatus().isComplete() && requisiteStageRefIds.contains(stage.getRefId());
+          })
+          .collect(toList());
+
+        childStages.forEach((Stage<T> childStage) -> {
+          StageDefinitionBuilder stageBuilder = allStageBuilders
+            .stream()
+            .filter(it -> it.getType().equals(childStage.getType()))
+            .findFirst()
+            .orElse(self);
+          stageBuilder.prepareStageForRestart(executionRepository, childStage, allStageBuilders);
+
+          // the default `prepareStageForRestart` behavior sets a stage back to RUNNING, that's not appropriate for child stages
+          childStage.setStatus(ExecutionStatus.NOT_STARTED);
+          List<Task> childStageTasks = childStage.getTasks();
+          childStageTasks.forEach(it -> {
+            it.setStartTime(null);
+            it.setEndTime(null);
+            it.setStatus(ExecutionStatus.NOT_STARTED);
+          });
+          executionRepository.storeStage(childStage);
         });
-        executionRepository.storeStage(childStage);
-      });
 
-      List<Task> tasks = stage.getTasks();
-      tasks
-        .stream()
-        .filter(t -> t.getStatus().isHalt())
-        .forEach(t -> {
-          t.setStartTime(null);
-          t.setEndTime(null);
-          t.setStatus(ExecutionStatus.NOT_STARTED);
-        });
+        List<Task> tasks = stage.getTasks();
+        tasks
+          .stream()
+          .filter(t -> t.getStatus().isHalt())
+          .forEach(t -> {
+            t.setStartTime(null);
+            t.setEndTime(null);
+            t.setStatus(ExecutionStatus.NOT_STARTED);
+          });
 
-      stage.getContext().put("restartDetails", new HashMap() {{
-        put("restartedBy", AuthenticatedRequest.getSpinnakerUser().orElse("anonymous"));
-        put("restartTime", System.currentTimeMillis());
-        if (stage.getContext().containsKey("exception")) {
-          put("previousException", stage.getContext().get("exception"));
-          stage.getContext().remove("exception");
+        stage.getContext().put("restartDetails", new HashMap() {{
+          put("restartedBy", AuthenticatedRequest.getSpinnakerUser().orElse("anonymous"));
+          put("restartTime", System.currentTimeMillis());
+          if (stage.getContext().containsKey("exception")) {
+            put("previousException", stage.getContext().get("exception"));
+            stage.getContext().remove("exception");
+          }
+        }});
+
+        stage.setStatus(ExecutionStatus.RUNNING);
+        stage.setStartTime(null);
+        stage.setEndTime(null);
+        executionRepository.storeStage(stage);
+
+        Execution.PausedDetails paused = stage.getExecution().getPaused();
+        if (paused != null && paused.isPaused()) {
+          // pipeline appears to be PAUSED and should be resumed regardless of current TERMINAL status
+          executionRepository.resume(
+            stage.getExecution().getId(),
+            AuthenticatedRequest.getSpinnakerUser().orElse("anonymous"),
+            true
+          );
         }
-      }});
-
-      stage.setStatus(ExecutionStatus.RUNNING);
-      stage.setStartTime(null);
-      stage.setEndTime(null);
-      executionRepository.storeStage(stage);
-
-      Execution.PausedDetails paused = stage.getExecution().getPaused();
-      if (paused != null && paused.isPaused()) {
-        // pipeline appears to be PAUSED and should be resumed regardless of current TERMINAL status
-        executionRepository.resume(
-          stage.getExecution().getId(),
-          AuthenticatedRequest.getSpinnakerUser().orElse("anonymous"),
-          true
-        );
       }
 
       return stage;
